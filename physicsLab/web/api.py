@@ -6,7 +6,7 @@ import sys
 import asyncio
 import functools
 import contextvars
-import requests
+from . import _request
 from ._api import _User, get_avatar, get_start_page, _check_response, _api_result
 from physicsLab import plAR
 from physicsLab import enums
@@ -259,9 +259,10 @@ def anonymous_login() -> User:
     else:
         plar_version = 2411
 
-    response = requests.post(
-        "http://physics-api-cn.turtlesim.com/Users/Authenticate",
-        json={
+    response_json = _request.post_http(
+        domain="physics-api-cn.turtlesim.com",
+        path="Users/Authenticate",
+        body={
             "Login": None,
             "Password": None,
             "Version": plar_version,
@@ -270,12 +271,12 @@ def anonymous_login() -> User:
                 "Language": "Chinese",
             },
         },
-        headers={
+        header={
             "Content-Type": "application/json",
         },
     )
 
-    return User(_check_response(response))
+    return User(_check_response(response_json))
 
 
 def email_login(email: str, password: str) -> User:
@@ -295,9 +296,10 @@ def email_login(email: str, password: str) -> User:
     else:
         plar_version = 2411
 
-    response = requests.post(
-        "http://physics-api-cn.turtlesim.com/Users/Authenticate",
-        json={
+    response_json = _request.post_http(
+        domain="physics-api-cn.turtlesim.com",
+        path="Users/Authenticate",
+        body={
             "Login": email,
             "Password": password,
             "Version": plar_version,
@@ -306,12 +308,12 @@ def email_login(email: str, password: str) -> User:
                 "Language": "Chinese",
             },
         },
-        headers={
+        header={
             "Content-Type": "application/json",
         },
     )
 
-    return User(_check_response(response))
+    return User(_check_response(response_json))
 
 
 def token_login(token: str, auth_code: str) -> User:
@@ -331,9 +333,10 @@ def token_login(token: str, auth_code: str) -> User:
     else:
         plar_version = 2411
 
-    response = requests.post(
-        "http://physics-api-cn.turtlesim.com/Users/Authenticate",
-        json={
+    response_json = _request.post_http(
+        domain="physics-api-cn.turtlesim.com",
+        path="Users/Authenticate",
+        body={
             "Login": None,
             "Password": None,
             "Version": plar_version,
@@ -342,14 +345,14 @@ def token_login(token: str, auth_code: str) -> User:
                 "Language": "Chinese",
             },
         },
-        headers={
+        header={
             "Content-Type": "application/json",
             "x-API-Token": token,
             "x-API-AuthCode": auth_code,
         },
     )
 
-    return User(_check_response(response))
+    return User(_check_response(response_json))
 
 
 async def async_anonymous_login() -> Awaitable[User]:
