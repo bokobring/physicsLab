@@ -1,43 +1,30 @@
 # -*- coding: utf-8 -*-
-"""对物实网络api的封装
-除了上传实验的api的封装在class Experiment的__upload
-该文件提供多线程风格的api的调用方式的支持
-"""
 
 import os
-import requests
+import json
+import uuid
+import urllib.request
+import urllib.error
 
 from physicsLab import plAR
 from physicsLab import enums
 from physicsLab import errors
+from physicsLab.web import _request
 from physicsLab.enums import Tag, Category
 from physicsLab._typing import Optional, List, TypedDict, Callable
 
 
 class _api_result(TypedDict):
-    """物实api返回体的结构
-    @param Token: 令牌
-    @param AuthCode: 鉴权码
-    @param Data: 实际返回的数据
-    """
-
     Token: str
     AuthCode: Optional[str]
     Data: dict
 
 
 def _check_response(
-    response: requests.Response, err_callback: Optional[Callable] = None
+    response_json: dict, err_callback: Optional[Callable] = None
 ) -> _api_result:
-    """检查返回的response
-    @callback: 自定义物实返回的status对应的报错信息,
-                要求传入status_code(捕获物实返回体中的status_code), 无返回值
-    """
     errors.assert_true(err_callback is None or callable(err_callback))
 
-    response.raise_for_status()
-
-    response_json = response.json()
     status_code = response_json["Status"]
 
     if status_code == 200:
@@ -51,10 +38,9 @@ def _check_response(
 
 
 def get_start_page() -> _api_result:
-    """获取主页数据"""
-    response = requests.get("https://physics-api-cn.turtlesim.com/Users")
-
-    return _check_response(response)
+    response_bytes = _request.get_https("physics-api-cn.turtlesim.com", "Users")
+    response_json = json.loads(response_bytes)
+    return _check_response(response_json)
 
 
 def get_avatar(
@@ -64,13 +50,6 @@ def get_avatar(
     size_category: str,
     usehttps: bool = False,
 ) -> bytes:
-    """获取头像/实验封面
-    @param target_id: 用户id或实验id
-    @param index: 历史图片的索引
-    @param category: 只能为 "experiments" 或 "users"
-    @param size_category: 只能为 "small.round" 或 "thumbnail" 或 "full"
-    @param usehttps: 是否使用HTTPS协议，由于证书和域名不匹配，所以如果使用，则不会验证证书
-    """
     if not isinstance(target_id, str):
         errors.type_error(
             f"Parameter `target_id` must be of type `str`, but got value `{target_id}` of type `{type(target_id).__name__}`"
@@ -107,63 +86,49 @@ def get_avatar(
     else:
         errors.unreachable()
 
-    protocol = "https" if usehttps else "http"
-    port = "443" if usehttps else "80"
-
-    url = (
-        f"{protocol}://physics-static-cn.turtlesim.com:{port}/{category}"
-        f"/{target_id[0:4]}/{target_id[4:6]}/{target_id[6:8]}/{target_id[8:]}/{index}.jpg!{size_category}"
+    path = (
+        f"{category}/{target_id[0:4]}/{target_id[4:6]}/{target_id[6:8]}"
+        f"/{target_id[8:]}/{index}.jpg!{size_category}"
     )
+    domain = "physics-static-cn.turtlesim.com"
 
     if usehttps:
-        response = requests.get(url, verify=False)
+        content = _request.get_https(domain, path, verify=False)
     else:
-        response = requests.get(url)
+        content = _request.get_http(domain, path)
 
-    if b"<Error>" in response.content:
+    if b"<Error>" in content:
         raise IndexError("avatar not found")
-    return response.content
+    return content
 
 
-# TODO 进一步封装发送请求的函数
 class _User:
-    """该class仅提供阻塞的api"""
-
     token: str
     auth_code: str
-    # True: 绑定了账号; False: 未绑定账号，是匿名登录
     is_binded: bool
-    # 硬件指纹
     device_token: str
-    # 账号id
     user_id: str
-    # 昵称
     nickname: Optional[str]
-    # 签名
     signature: Optional[str]
-    # 金币数量
     gold: int
-    # 用户等级
     level: int
-    # 头像的索引
     avatar: int
     avatar_region: int
     decoration: int
-    # 存储了所有与每日活动有关的奖励信息 (比如ActivityID)
     statistic: dict
 
     def __init__(*args, **kwargs) -> None:
         raise NotImplementedError
 
     def get_library(self) -> _api_result:
-        """获取社区作品列表"""
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com/Contents/GetLibrary",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Contents/GetLibrary",
+            body={
                 "Identifier": "Discussions",
                 "Language": "Chinese",
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -184,16 +149,6 @@ class _User:
         skip: int = 0,
         from_skip: Optional[str] = None,
     ) -> _api_result:
-        """查询实验
-        @param category: 实验区还是黑洞区
-        @param tags: 根据列表内的物实实验的标签进行对应的搜索
-        @param exclude_tags: 除了列表内的标签的实验都会被搜索到
-        @param languages: 根据列表内的语言进行对应的搜索
-        @param exclude_languages: 除了列表内的语言的实验都会被搜索到
-        @param user_id: 指定搜索的作品的发布者
-        @param take: 搜索数量
-        @param skip: 跳过搜索数量
-        """
         if not isinstance(category, Category):
             errors.type_error(
                 f"Parameter `category` must be an instance of Category enum, but got value `{category}` of type `{type(category).__name__}`"
@@ -268,9 +223,10 @@ class _User:
         else:
             _exclude_tags = [tag.value for tag in exclude_tags]
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com/Contents/QueryExperiments",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Contents/QueryExperiments",
+            body={
                 "Query": {
                     "Category": category.value,
                     "Languages": languages,
@@ -286,11 +242,11 @@ class _User:
                     "Skip": skip,
                     "Take": take,
                     "Days": 0,
-                    "Sort": 0,  # TODO 这个也许是那个史上热门之类的?
+                    "Sort": 0,
                     "ShowAnnouncement": False,
                 }
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -304,11 +260,6 @@ class _User:
         content_id: str,
         category: Optional[Category] = None,
     ) -> _api_result:
-        """获取实验
-        @param content_id: 当category不为None时, content_id为实验ID,
-                           否则会被识别为get_summary()["Data"]["ContentID"]的结果
-        @param category: 实验区还是黑洞区
-        """
         if not isinstance(content_id, str):
             errors.type_error(
                 f"Parameter `content_id` must be of type `str`, but got value `{content_id}` of type `{type(content_id).__name__}`"
@@ -319,15 +270,15 @@ class _User:
             )
 
         if category is not None:
-            # 如果传入的是实验ID, 先获取summary来得到ContentID
             content_id = self.get_summary(content_id, category)["Data"]["ContentID"]
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com:443/Contents/GetExperiment",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Contents/GetExperiment",
+            body={
                 "ContentID": content_id,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -339,7 +290,6 @@ class _User:
     def confirm_experiment(
         self, summary_id: str, category: Category, image_counter: int
     ) -> _api_result:
-        """确认发布实验"""
         if not isinstance(summary_id, str):
             errors.type_error(
                 f"Parameter `summary_id` must be of type `str`, but got value `{summary_id}` of type `{type(summary_id).__name__}`"
@@ -353,15 +303,16 @@ class _User:
                 f"Parameter `image_counter` must be of type `int`, but got value `{image_counter}` of type `{type(image_counter).__name__}`"
             )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com/Contents/ConfirmExperiment",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Contents/ConfirmExperiment",
+            body={
                 "SummaryID": summary_id,
                 "Category": category.value,
                 "Image": image_counter,
                 "Extension": ".jpg",
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -373,10 +324,6 @@ class _User:
     def remove_experiment(
         self, summary_id: str, category: Category, reason: Optional[str] = None
     ) -> _api_result:
-        """隐藏实验
-        @param summary_id: 实验ID
-        @param category: 实验区还是黑洞区
-        """
         if not isinstance(summary_id, str):
             errors.type_error(
                 f"Parameter `summary_id` must be of type `str`, but got value `{summary_id}` of type `{type(summary_id).__name__}`"
@@ -397,15 +344,16 @@ class _User:
             else "2411"
         )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com:443/Contents/RemoveExperiment",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Contents/RemoveExperiment",
+            body={
                 "Category": category.value,
                 "SummaryID": summary_id,
                 "Hiding": True,
                 "Reason": reason,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -423,13 +371,6 @@ class _User:
         reply_id: Optional[str] = None,
         special: Optional[str] = None,
     ) -> _api_result:
-        """发表评论
-        @param target_id: 目标用户/实验的ID
-        @param target_type: User, Discussion, Experiment
-        @param content: 评论内容
-        @param reply_id: 被回复的user的ID (可被自动推导)
-        @param special: 为 "Reminder" 的话则是发送警告, 为None则是普通的评论
-        """
         if not isinstance(target_id, str):
             errors.type_error(
                 f"Parameter `target_id` must be of type `str`, but got value `{target_id}` of type `{type(target_id).__name__}`"
@@ -458,7 +399,6 @@ class _User:
         if reply_id is None:
             reply_id = ""
 
-            # 物实支持多语: 中文、英文、法文、德文、西班牙文、日文、乌克兰文、波兰文
             if (
                 content.startswith("回复@")
                 or content.startswith("Reply@")
@@ -490,9 +430,10 @@ class _User:
 
         assert isinstance(reply_id, str)
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com:443/Messages/PostComment",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Messages/PostComment",
+            body={
                 "TargetID": target_id,
                 "TargetType": target_type,
                 "Language": "Chinese",
@@ -500,7 +441,7 @@ class _User:
                 "Content": content,
                 "Special": special,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -510,13 +451,9 @@ class _User:
         return _check_response(response)
 
     def remove_comment(self, comment_id: str, target_type: str) -> _api_result:
-        """删除评论
-        @param comment_id: 评论ID, 可以通过`get_comments`获取
-        @param target_type: User, Discussion, Experiment
-        """
         if not isinstance(comment_id, str):
             errors.type_error(
-                f"Parameter `comment_id` must be of type `str`, but got value `{commend_id}` of type `{type(comment_id).__name__}`"
+                f"Parameter `comment_id` must be of type `str`, but got value `{comment_id}` of type `{type(comment_id).__name__}`"
             )
         if not isinstance(target_type, str):
             errors.type_error(
@@ -527,13 +464,14 @@ class _User:
                 f"Parameter `target_type` must be one of ['User', 'Discussion', 'Experiment'], but got value `{target_type}`"
             )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com:443/Messages/RemoveComment",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Messages/RemoveComment",
+            body={
                 "TargetType": target_type,
                 "CommentID": comment_id,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -550,13 +488,6 @@ class _User:
         skip: int = 0,
         comment_id: Optional[str] = None,
     ) -> _api_result:
-        """获取评论板信息
-        @param target_id: 物实用户的ID/实验的id
-        @param target_type: User, Discussion, Experiment
-        @param take: 获取留言的数量
-        @param skip: 跳过的留言数量, 为(unix时间戳 * 1000)
-        @param comment_id: 从comment_id开始获取take条消息 (另一种skip的规则)
-        """
         if not isinstance(target_id, str):
             errors.type_error(
                 f"Parameter `target_id` must be of type `str`, but got value `{target_id}` of type `{type(target_id).__name__}`"
@@ -582,16 +513,17 @@ class _User:
                 f"Parameter `target_type` must be one of ['User', 'Discussion', 'Experiment'], but got value `{target_type} of type '{target_type}'"
             )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com:443/Messages/GetComments",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Messages/GetComments",
+            body={
                 "TargetID": target_id,
                 "TargetType": target_type,
                 "CommentID": comment_id,
                 "Take": take,
                 "Skip": skip,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -601,10 +533,6 @@ class _User:
         return _check_response(response)
 
     def get_summary(self, content_id: str, category: Category) -> _api_result:
-        """获取实验介绍
-        @param content_id: 实验ID
-        @param category: 实验区还是黑洞区
-        """
         if not isinstance(content_id, str):
             errors.type_error(
                 f"Parameter `content_id` must be of type `str`, but got value `{content_id}` of type `{type(content_id).__name__}`"
@@ -614,13 +542,14 @@ class _User:
                 f"Parameter `category` must be an instance of Category enum, but got value `{category}` of type `{type(category).__name__}`"
             )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com/Contents/GetSummary",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Contents/GetSummary",
+            body={
                 "ContentID": content_id,
                 "Category": category.value,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -639,10 +568,6 @@ class _User:
         return _check_response(response, callback)
 
     def get_derivatives(self, content_id: str, category: Category) -> _api_result:
-        """获取作品的详细信息, 物实第一次读取作品会使用此接口
-        @param content_id: 实验ID
-        @param category: 实验区还是黑洞区
-        """
         if not isinstance(content_id, str):
             errors.type_error(
                 f"Parameter `content_id` must be of type `str`, but got value `{content_id}` of type `{type(content_id).__name__}`"
@@ -652,13 +577,14 @@ class _User:
                 f"Parameter `category` must be an instance of Category enum, but got value `{category}` of type `{type(category).__name__}`"
             )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com/Contents/GetDerivatives",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Contents/GetDerivatives",
+            body={
                 "ContentID": content_id,
                 "Category": category.value,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -672,10 +598,6 @@ class _User:
         msg: str,
         get_user_mode: enums.GetUserMode,
     ) -> _api_result:
-        """获取用户信息
-        @param msg: 用户ID/用户名
-        @param get_user_mode: 根据ID/用户名获取用户信息
-        """
         if not isinstance(msg, str):
             errors.type_error(
                 f"Parameter `msg` must be of type `str`, but got value `{msg}` of type {type(msg).__name__}`"
@@ -693,10 +615,11 @@ class _User:
         else:
             errors.unreachable()
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com:443/Users/GetUser",
-            json=body,
-            headers={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Users/GetUser",
+            body=body,
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -706,22 +629,18 @@ class _User:
         return _check_response(response)
 
     def get_profile(self, user_id: Optional[str] = None) -> _api_result:
-        """获取用户主页信息
-
-        Args:
-            user_id: 要获取主页信息的用户的id, 若为None则是获取自己的主页信息
-        """
         if not isinstance(user_id, (str, type(None))):
             errors.type_error(f"Parameter user_id must be of type `Optional[str]`, but got value {user_id} of type `{type(user_id).__name__}`")
 
         if user_id is None:
             user_id = self.user_id
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com:443/Contents/GetProfile",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Contents/GetProfile",
+            body={
                 "ID": user_id,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -733,12 +652,6 @@ class _User:
     def star_content(
         self, content_id: str, category: Category, star_type: int, status: bool = True
     ) -> _api_result:
-        """收藏/支持 某个实验
-        @param content_id: 实验ID
-        @param category: 实验区, 黑洞区
-        @param star_type: 0: 收藏, 1: 使用金币支持实验
-        @param status: True: 收藏, False: 取消收藏 (对支持无作用)
-        """
         if not isinstance(content_id, str):
             errors.type_error(
                 f"Parameter `content_id` must be of type `str`, but got value `{content_id}` of type `{type(content_id).__name__}`"
@@ -760,15 +673,16 @@ class _User:
                 f"Parameter `star_type` must be one of [0, 1], but got value `{star_type} of type '{star_type}'"
             )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com/Contents/StarContent",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Contents/StarContent",
+            body={
                 "ContentID": content_id,
                 "Status": status,
                 "Category": category.value,
                 "Type": star_type,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -780,10 +694,6 @@ class _User:
     def upload_image(
         self, policy: str, authorization: str, image_path: str
     ) -> _api_result:
-        """上传实验图片
-        @param authorization: 可通过/Contents/SubmitExperiment获取
-        @param image_path: 待上传的图片在本地的路径
-        """
         if policy is None or authorization is None:
             raise RuntimeError("Sorry, Physics-Lab-AR can't upload this iamge")
         if not isinstance(policy, str):
@@ -802,38 +712,55 @@ class _User:
             raise FileNotFoundError(f"`{image_path}` not found")
 
         with open(image_path, "rb") as f:
-            data = {
-                "policy": (None, policy, None),
-                "authorization": (None, authorization, None),
-                "file": ("temp.jpg", f, None),
-            }
-            response = requests.post(
-                "http://v0.api.upyun.com/qphysics",
-                files=data,
-            )
-            response.raise_for_status()
-            if response.json()["code"] != 200:
-                raise errors.ResponseFail(
-                    response.json()["code"],
-                    response.json()['message']
-                )
-            return response.json()
+            image_content = f.read()
+
+        boundary = "----WebKitFormBoundary" + uuid.uuid4().hex
+        
+        body = b""
+        body += f'--{boundary}\r\n'.encode('utf-8')
+        body += b'Content-Disposition: form-data; name="policy"\r\n\r\n'
+        body += policy.encode('utf-8') + b'\r\n'
+        
+        body += f'--{boundary}\r\n'.encode('utf-8')
+        body += b'Content-Disposition: form-data; name="authorization"\r\n\r\n'
+        body += authorization.encode('utf-8') + b'\r\n'
+
+        body += f'--{boundary}\r\n'.encode('utf-8')
+        body += b'Content-Disposition: form-data; name="file"; filename="temp.jpg"\r\n'
+        body += b'Content-Type: image/jpeg\r\n\r\n'
+        body += image_content + b'\r\n'
+        
+        body += f'--{boundary}--\r\n'.encode('utf-8')
+        
+        headers = {'Content-Type': f'multipart/form-data; boundary={boundary}'}
+        
+        req = urllib.request.Request("http://v0.api.upyun.com/qphysics", data=body, headers=headers, method='POST')
+
+        try:
+            with urllib.request.urlopen(req) as response:
+                if response.status >= 400:
+                    raise errors.ResponseFail(response.status, response.reason)
+                response_data = json.loads(response.read())
+                if response_data.get("code") != 200:
+                    raise errors.ResponseFail(response_data.get("code"), response_data.get('message'))
+                return response_data
+        except urllib.error.HTTPError as e:
+            raise errors.ResponseFail(e.code, e.reason) from e
+
 
     def get_message(self, message_id: str) -> _api_result:
-        """读取系统邮件消息
-        @param message_id: 消息的id
-        """
         if not isinstance(message_id, str):
             errors.type_error(
                 f"Parameter `message_id` must be of type `str`, but got value `{message_id}` of type `{type(message_id).__name__}`"
             )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com/Messages/GetMessage",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Messages/GetMessage",
+            body={
                 "MessageID": message_id,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -849,13 +776,6 @@ class _User:
         take: int = 16,
         no_templates: bool = True,
     ) -> _api_result:
-        """获取用户收到的消息
-        @param category_id: 消息类型:
-            0: 全部, 1: 系统邮件, 2: 关注和粉丝, 3: 评论和回复, 4: 作品通知, 5: 管理记录
-        @param skip: 跳过skip条消息
-        @param take: 取take条消息
-        @param no_templates: 是否不返回消息种类的模板消息
-        """
         if category_id not in (0, 1, 2, 3, 4, 5):
             errors.type_error(
                 f"Parameter `category_id` must be an integer within [0, 5], but got value `{category_id}` of type `{category_id}`"
@@ -873,15 +793,16 @@ class _User:
                 f"Parameter `no_templates` must be of type `bool`, but got value `{no_templates}` of type `{type(no_templates).__name__}`"
             )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com/Messages/GetMessages",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Messages/GetMessages",
+            body={
                 "CategoryID": category_id,
                 "Skip": skip,
                 "Take": take,
                 "NoTemplates": no_templates,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -897,11 +818,6 @@ class _User:
         skip: int = 0,
         take: int = 16,
     ) -> _api_result:
-        """获取支持列表
-        @param category: .Experiment 或 .Discussion
-        @param skip: 传入一个时间戳, 跳过skip条消息
-        @param take: 取take条消息
-        """
         if not isinstance(content_id, str):
             errors.type_error(
                 f"Parameter `content_id` must be of type `str`, but got value `{content_id}` of type `{type(content_id).__name__}`"
@@ -919,15 +835,16 @@ class _User:
                 f"Parameter `take` must be of type `int`, but got value `{take}` of type `{type(take).__name__}`"
             )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com/Contents/GetSupporters",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Contents/GetSupporters",
+            body={
                 "ContentID": content_id,
                 "Category": category.value,
                 "Skip": skip,
                 "Take": take,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -942,14 +859,8 @@ class _User:
         display_type: str = "Follower",
         skip: int = 0,
         take: int = 20,
-        query: str = "",  # TODO 获取编辑，志愿者列表啊之类的貌似也是这个api
+        query: str = "",
     ) -> _api_result:
-        """获取用户的关注/粉丝列表
-        @param display_type: 只能为 Follower: 粉丝, Following: 关注
-        @param skip: 跳过skip个用户
-        @param take: 取take个用户
-        @param query: 为用户id或昵称
-        """
         if display_type not in ("Follower", "Following"):
             raise ValueError(
                 f"Parameter `display_type` must be one of ['Follower', 'Following'], but got value `{display_type}` of type `{display_type}`"
@@ -974,16 +885,17 @@ class _User:
         else:
             errors.unreachable()
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com:443/Users/GetRelations",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Users/GetRelations",
+            body={
                 "UserID": user_id,
                 "DisplayType": display_type_,
                 "Skip": skip,
                 "Take": take,
                 "Query": query,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -993,10 +905,6 @@ class _User:
         return _check_response(response)
 
     def follow(self, target_id: str, action: bool = True) -> _api_result:
-        """关注用户
-        @param target_id: 被关注的用户的id
-        @param action: true为关注, false为取消关注
-        """
         if not isinstance(target_id, str):
             errors.type_error(
                 f"Parameter `target_id` must be of type `str`, but got value `{target_id}` of type `{type(target_id).__name__}`"
@@ -1006,13 +914,14 @@ class _User:
                 f"Parameter `action` must be of type `bool`, but got value `{action}` of type `{type(action).__name__}`"
             )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com:443/Users/Follow",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Users/Follow",
+            body={
                 "TargetID": target_id,
                 "Action": int(action),
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -1022,21 +931,19 @@ class _User:
         return _check_response(response)
 
     def rename(self, nickname: str) -> _api_result:
-        """修改用户昵称
-        @param nickname: 新昵称
-        """
         if not isinstance(nickname, str):
             errors.type_error(
                 f"Parameter `nickname` must be of type `str`, but got value `{nickname}` of type {type(nickname).__name__}`"
             )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com:443/Users/Rename",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Users/Rename",
+            body={
                 "Target": nickname,
                 "UserID": self.user_id,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -1046,21 +953,19 @@ class _User:
         return _check_response(response)
 
     def modify_information(self, target: str) -> _api_result:
-        """修改用户签名
-        @param target: 新签名
-        """
         if not isinstance(target, str):
             errors.type_error(
                 f"Parameter `target` must be of type `str`, but got value `{target}` of type `{type(target).__name__}`"
             )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com:443/Users/ModifyInformation",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Users/ModifyInformation",
+            body={
                 "Target": target,
                 "Field": "Signature",
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -1070,10 +975,6 @@ class _User:
         return _check_response(response)
 
     def receive_bonus(self, activity_id: str, index: int) -> _api_result:
-        """领取每日签到奖励
-        @param activity_id: 活动id
-        @param index: 该活动的第几次奖励
-        """
         if not isinstance(activity_id, str):
             errors.type_error(
                 f"Parameter `activity_id` must be of type `str`, but got value `{activity_id}` of type `{type(activity_id).__name__}`"
@@ -1087,14 +988,15 @@ class _User:
                 f"Parameter `index` must be a non-negative integer, but got value `{index}`"
             )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com:443/Users/ReceiveBonus",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Users/ReceiveBonus",
+            body={
                 "ActivityID": activity_id,
                 "Index": index,
                 "Statistic": self.statistic,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -1104,11 +1006,6 @@ class _User:
         return _check_response(response)
 
     def ban(self, target_id: str, reason: str, length: int) -> _api_result:
-        """封禁用户
-        @param target_id: 要封禁的用户的id
-        @param reason: 封禁理由
-        @param length: 封禁天数
-        """
         if not isinstance(target_id, str):
             errors.type_error(
                 f"Parameter target_id must be of type `str`, but got value `{target_id}` of type `{type(target_id).__name__}`"
@@ -1122,17 +1019,18 @@ class _User:
                 f"Parameter length must be of type `int`, but got value `{length}` of type `{type(length).__name__}`"
             )
 
-        if length <= 0:  # TODO 改天试试负数会发生什么
+        if length <= 0:
             raise ValueError
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com:443/Users/Ban",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Users/Ban",
+            body={
                 "TargetID": target_id,
                 "Reason": reason,
                 "Length": length,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
@@ -1142,10 +1040,6 @@ class _User:
         return _check_response(response)
 
     def unban(self, target_id: str, reason: str) -> _api_result:
-        """解除封禁
-        @param target_id: 要解除封禁的用户的id
-        @param reason: 解封理由
-        """
         if not isinstance(target_id, str):
             errors.type_error(
                 f"Parameter target_id must be of type `str`, but got value `{target_id}` of type `{type(target_id).__name__}`"
@@ -1155,13 +1049,14 @@ class _User:
                 f"Parameter reason must be of type `str`, but got value `{reason}` of type `{type(reason).__name__}`"
             )
 
-        response = requests.post(
-            "https://physics-api-cn.turtlesim.com:443/Users/Unban",
-            json={
+        response = _request.post_https(
+            "physics-api-cn.turtlesim.com",
+            "Users/Unban",
+            body={
                 "TargetID": target_id,
                 "Reason": reason,
             },
-            headers={
+            header={
                 "Content-Type": "application/json",
                 "x-API-Token": self.token,
                 "x-API-AuthCode": self.auth_code,
